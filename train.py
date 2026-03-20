@@ -16,6 +16,9 @@ from neuralacoustics.utils import count_params
 from neuralacoustics.adam import Adam # adam implementation that deals with complex tensors correctly [lacking in pytorch <=1.8, not sure afterwards]
 from torch.utils.tensorboard import SummaryWriter
 
+from torchvista import trace_model
+from contextlib import redirect_stdout
+
 # retrieve PRJ_ROOT
 prj_root = getProjectRoot(__file__)
 
@@ -107,6 +110,8 @@ model_root = Path(model_root)
 seed = config['training'].getint('seed')
 
 dev = config['training'].get('dev')
+
+trace = config['training'].getboolean('trace')
 
 print('Model and training parameters:')
 print(f'\tdataset name: {dataset_name}')
@@ -275,6 +280,11 @@ for ep in range(epochs):
         loss = 0
         xx = xx.to(dev)
         yy = yy.to(dev)
+
+        if trace:
+            trace = False  # trace only with the first chunk
+            with redirect_stdout(None):  # suppress the console output since the trace is being saved to file
+                trace_model(model, xx, export_format="html", export_path=model_dir.joinpath(model_name + '.html'))
 
         # model outputs 1 timestep at a time [i.e., labels], so we iterate over T_out steps to compute loss
         for t in range(0, T_out):
