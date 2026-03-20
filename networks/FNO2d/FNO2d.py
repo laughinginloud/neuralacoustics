@@ -1,10 +1,12 @@
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import operator
 from neuralacoustics.utils import openConfig
 
-import numpy as np
+from neuralop.layers.embeddings import GridEmbedding2D
+from neuralop.layers.fno_block import FNOBlocks
+from neuralop.layers.padding import DomainPadding
+from neuralop.layers.channel_mlp import ChannelMLP
+
 #VIC this is the content of: https://github.com/zongyi-li/fourier_neural_operator/blob/master/fourier_2d_time.py
 # i made a small modification to the original code, highlighted by the following comment: #VIC-mod
 
@@ -12,43 +14,22 @@ import numpy as np
 # fourier layer
 ################################################################
 
-class SpectralConv2d_fast(nn.Module):
-    def __init__(self, in_channels, out_channels, modes1, modes2):
-        super(SpectralConv2d_fast, self).__init__()
-
-        """
-        2D Fourier layer. It does FFT, linear transform, and Inverse FFT.    
-        """
-
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.modes1 = modes1 #Number of Fourier modes to multiply, at most floor(N/2) + 1
-        self.modes2 = modes2
-
-        self.scale = (1 / (in_channels * out_channels))
-        self.weights1 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, dtype=torch.cfloat))
-        self.weights2 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, dtype=torch.cfloat))
-
-    # Complex multiplication
-    def compl_mul2d(self, input, weights):
-        # (batch, in_channel, x,y ), (in_channel, out_channel, x,y) -> (batch, out_channel, x,y)
-        return torch.einsum("bixy,ioxy->boxy", input, weights)
-
+class Permute(nn.Module):
+    """
+    simple module to perform permutations inside sequential networks
+    """
+    def __init__(self, *dims):
+        super().__init__()
+        self.dims = dims
+        
     def forward(self, x):
-        batchsize = x.shape[0]
-        #Compute Fourier coeffcients up to factor of e^(- something constant)
-        x_ft = torch.fft.rfft2(x)
+        return x.permute(*self.dims)
 
-        # Multiply relevant Fourier modes
-        out_ft = torch.zeros(batchsize, self.out_channels,  x.size(-2), x.size(-1)//2 + 1, dtype=torch.cfloat, device=x.device)
-        out_ft[:, :, :self.modes1, :self.modes2] = \
-            self.compl_mul2d(x_ft[:, :, :self.modes1, :self.modes2], self.weights1)
-        out_ft[:, :, -self.modes1:, :self.modes2] = \
-            self.compl_mul2d(x_ft[:, :, -self.modes1:, :self.modes2], self.weights2)
-
-        #Return to physical space
-        x = torch.fft.irfft2(out_ft, s=(x.size(-2), x.size(-1)))
-        return x
+def fnoToSeq(n_layers, fno):
+    """
+    simple function to transform from FNOBlocks to nn.Sequential
+    """
+    return nn.Sequential(*[fno[i] for i in range(n_layers)])
 
 class FNO2d(nn.Module):
     # WYNN-mod: Add stacks_num input argument
@@ -57,10 +38,10 @@ class FNO2d(nn.Module):
 
         """
         The overall network. It contains 4 layers of the Fourier layer.
-        1. Lift the input to the desire channel dimension by self.fc0 .
+        1. Lift the input to the desire channel dimension by self.lift.
         2. 4 layers of the integral operators u' = (W + K)(u).
             W defined by self.w; K defined by self.conv .
-        3. Project from the channel space to the output space by self.fc1 and self.fc2 .
+        3. Project from the channel space to the output space by self.project.
         
         input: the solution of the previous t_in timesteps + 2 locations (u(t-t_in, x, y), ..., u(t-1, x, y),  x, y)
         input shape: (batchsize, x=64, y=64, c=t_in+2)
@@ -74,49 +55,79 @@ class FNO2d(nn.Module):
         self.modes2 = network_config['network_parameters'].getint('network_modes')
         self.width = network_config['network_parameters'].getint('network_width')
         self.stacks_num = network_config['network_parameters'].getint('stacks_num')
-        self.padding = 2 # pad the domain if input is non-periodic
+        self.pad_on = network_config['network_parameters'].getboolean('pad_on')
+        self.padding = network_config['network_parameters'].getfloat('padding')
+        self.mlp_on = network_config['network_parameters'].getboolean('mlp_on')
+        self.normalization_on = network_config['network_parameters'].getboolean('normalization_on')
+        self.mlp_first = network_config['network_parameters'].getboolean('mlp_first')
+        self.mlp_last = network_config['network_parameters'].getboolean('mlp_last')
+        self.fact_on = network_config['network_parameters'].getboolean('fact_on')
+        self.fact = network_config['network_parameters'].get('fact')
+
+        self.grid_embed = nn.Sequential(
+            Permute(0, 3, 1, 2),
+            GridEmbedding2D(t_in+2),
+        )
         
         #VIC-mod t_in is passed as parameter now, so that we can decide the number of input time steps
-        #self.fc0 = nn.Linear(12, self.width)
-        self.fc0 = nn.Linear(t_in+2, self.width)
-        # input channel is 12: the solution of the previous t_in timesteps + 2 locations (u(t-10, x, y), ..., u(t-1, x, y),  x, y)
+        if self.mlp_first:
+            self.lift = ChannelMLP(
+                in_channels=t_in+2,
+                out_channels=self.width,
+                hidden_channels=2*self.width,
+                n_layers=2,
+                n_dim=2,
+                non_linearity=F.gelu,
+            )
+        else:
+            self.lift = nn.Sequential(
+                Permute(0, 2, 3, 1),
+                nn.Linear(t_in+2, self.width),
+                Permute(0, 3, 1, 2),
+            )
 
         # WYNN-mod: A module list for stacking layers
-        self.conv_list = nn.ModuleList([SpectralConv2d_fast(
-            self.width, self.width, self.modes1, self.modes2) for i in range(self.stacks_num)])
-        self.w_list = nn.ModuleList(
-            [nn.Conv2d(self.width, self.width, 1) for i in range(self.stacks_num)])
-        self.bn_list = nn.ModuleList([nn.BatchNorm2d(self.width) for i in range(self.stacks_num)])
+        self.conv_list = fnoToSeq(self.stacks_num,
+            FNOBlocks(
+                in_channels=self.width,
+                out_channels=self.width,
+                n_modes=(self.modes1, self.modes2),
+                n_layers=self.stacks_num,
+                use_channel_mlp=self.mlp_on,
+                channel_mlp_skip="soft-gating",
+                norm="instance_norm" if self.normalization_on else None,
+                factorization=self.fact if self.fact_on else None,
+                non_linearity=F.gelu,
+        ))
 
-        self.fc1 = nn.Linear(self.width, 128)
-        self.fc2 = nn.Linear(128, 1)
+        if self.mlp_last:
+            self.project = nn.Sequential(
+                ChannelMLP(self.width, 1, self.width * 2),
+                Permute(0, 2, 3, 1),
+            )
+        else:
+            self.project = nn.Sequential(
+                Permute(0, 2, 3, 1),
+                nn.Linear(self.width, 128),
+                nn.Linear(128, 1),
+            )
+            
+        if self.pad_on:
+            self.padder = DomainPadding(self.padding)
 
     def forward(self, x):
-        grid = self.get_grid(x.shape, x.device)
-        x = torch.cat((x, grid), dim=-1)
-        x = self.fc0(x)
-        x = x.permute(0, 3, 1, 2)
-        # x = F.pad(x, [0,self.padding, 0,self.padding]) # pad the domain if input is non-periodic
+        x = self.grid_embed(x)
 
-        # WYNN-mod: Use iteration to forward pass x through the stacked layers
-        for i in range(len(self.conv_list)):
-            x1 = self.conv_list[i](x)
-            x2 = self.w_list[i](x)
-            x = x1 + x2
-            if i != len(self.conv_list) - 1:
-                x = F.gelu(x)
+        x = self.lift(x)
+        
+        if self.pad_on:
+            x = self.padder.pad(x) # pad the domain if input is non-periodic
 
-        # x = x[..., :-self.padding, :-self.padding] # pad the domain if input is non-periodic
-        x = x.permute(0, 2, 3, 1)
-        x = self.fc1(x)
-        x = F.gelu(x)
-        x = self.fc2(x)
+        x = self.conv_list(x)
+        
+        if self.pad_on:
+            x = self.padder.unpad(x) # pad the domain if input is non-periodic
+
+        x = self.project(x)
+
         return x
-
-    def get_grid(self, shape, device):
-        batchsize, size_x, size_y = shape[0], shape[1], shape[2]
-        gridx = torch.tensor(np.linspace(0, 1, size_x), dtype=torch.float)
-        gridx = gridx.reshape(1, size_x, 1, 1).repeat([batchsize, 1, size_y, 1])
-        gridy = torch.tensor(np.linspace(0, 1, size_y), dtype=torch.float)
-        gridy = gridy.reshape(1, 1, size_y, 1).repeat([batchsize, size_x, 1, 1])
-        return torch.cat((gridx, gridy), dim=-1).to(device)
