@@ -1,3 +1,11 @@
+# Model tracing
+
+To trace a model, enable the flag in `default.ini`. The trace will then be in the same folder as the trained model.
+Some sample traces:
+- [original architecture](./trace/no_skip.html)
+- [improved architecture](.trace/complete.html)
+- [modular architecture](./trace/better_modularity.html)
+
 # Neuralacoustics: A Deep Learning Framework For Musical Acoustics Simulations 
 
 Neuralacoustics is a framework designed for the generation of numerical musical acoustics datasets and the training/benchmarking of acoustics neural operators.
