@@ -1,6 +1,8 @@
 from neuralacoustics.utils import openConfig
 from neuralacoustics.utils import MatReader
 
+from .init import *
+
 
 class DatasetManager:
     """

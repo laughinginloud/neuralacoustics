@@ -168,7 +168,71 @@ else:
     model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu'))['model_state_dict'])
 
 
+#---------------------------------------------------------------------
+# Load entry from dataset [test set]
 
+data_t_out = None
+if inference_type == 'multiple_step':
+    data_t_out = T_out
+else:
+    data_t_out = 1
+
+dataset_manager = DatasetManager(dataset_name, dataset_dir, False)
+u = dataset_manager.loadDataEntry(n=iterations, 
+                                  win=T_in+data_t_out, 
+                                  entry=entry, 
+                                  stride=data_t_out, 
+                                  offset=offset)
+
+if opcount:
+    u_opcount = dataset_manager.loadDataEntry(n=1, win=T_in+data_t_out, entry=0)
+    a_opcount = u_opcount[:, :, :, :T_in]
+
+# Get domain size
+u_shape = list(u.shape)
+S = u_shape[1]
+iterations = u_shape[0] # reload iterations
+
+# Assume that all datasets have simulations spanning square domains
+assert(S == u_shape[2])
+
+# Prepare test set
+n_test = iterations
+test_a = u[0:1, :, :, :T_in] # auto-regressive, hence only need 1 initial input is needed
+test_u = u[-n_test:, :, :, T_in:T_in+data_t_out]
+
+#print(train_u.shape, test_u.shape)
+assert(S == test_u.shape[-2])
+assert(data_t_out == test_u.shape[-1])
+
+# Set plot_waveform flag to true if mic position is valid and iterations >= 2
+plot_waveform = mic_x >= 0 and mic_y >= 0 and u_shape[0] >= 2
+if plot_waveform:
+    # Check validity of mic_x and mic_y
+    if mic_x >= S or mic_y >= S:
+        raise AssertionError("mic_x/mic_y out of bound")
+
+    pred_waveform = torch.zeros(iterations * data_t_out + T_in)
+    label_waveform = torch.zeros(iterations * data_t_out + T_in)
+    pred_waveform[:T_in] = test_a[0, mic_x, mic_y, :T_in]
+    label_waveform[:T_in] = test_a[0, mic_x, mic_y, :T_in]
+
+# Normalize input data 
+if normalize:
+    print("Normalizing input data...")
+    test_a = a_normalizer.encode(test_a)
+
+if inference_type == 'multiple_step':
+    test_a = test_a.reshape(1, S, S, 1, T_in).repeat([1, 1, 1, data_t_out, 1])  
+else:
+    test_a = test_a.reshape(1, S, S, T_in)
+
+if platform == 'darwin' or platform == 'win32':
+    num_workers = 0 
+else:
+    num_workers = 1 # for now single-process data loading, called explicitly to assure determinism in future multi-process calls
+
+print(f'Test input shape: {test_a.shape}, output shape: {test_u.shape}')
 
 print('Evaluation parameters:')
 print(f'\tdataset name: {dataset_name}')

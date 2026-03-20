@@ -2,6 +2,8 @@ import math
 from typing import List, Optional
 from torch.optim.optimizer import Optimizer
 
+from .init import *
+
 
 def adam(params: List[Tensor],
          grads: List[Tensor],

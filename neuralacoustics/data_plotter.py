@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt # to plot
 import matplotlib.colors as mcolors # to potentially use different color colormaps
 
+from .init import *
 
 def plotDomain(data, color_halfrange=1, maxAmp=20.0, log_min=10.0, pause=0.001, figNum=0):
 
