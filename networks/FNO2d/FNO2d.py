@@ -25,11 +25,11 @@ class Permute(nn.Module):
     def forward(self, x):
         return x.permute(*self.dims)
 
-def fnoToSeq(n_layers, fno):
+def fnoToSeq(fno: FNOBlocks, /):
     """
     simple function to transform from FNOBlocks to nn.Sequential
     """
-    return nn.Sequential(*[fno[i] for i in range(n_layers)])
+    return nn.Sequential(*[fno[i] for i in range(fno.n_layers)])
 
 class FNO2d(nn.Module):
     # WYNN-mod: Add stacks_num input argument
@@ -87,7 +87,7 @@ class FNO2d(nn.Module):
             )
 
         # WYNN-mod: A module list for stacking layers
-        self.conv_list = fnoToSeq(self.stacks_num,
+        self.conv_list = fnoToSeq(
             FNOBlocks(
                 in_channels=self.width,
                 out_channels=self.width,
