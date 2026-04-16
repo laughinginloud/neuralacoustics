@@ -252,7 +252,15 @@ print('Device:', dev)
 print(f'Number of model\'s parameters: {count_params(model)}')
 optimizer = Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
 # optimizer = SGD(model.parameters(), lr=learning_rate, weight_decay=1e-4, momentum=0.9) # this would need to be modified to handle complex arithmetic
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=scheduler_step, gamma=scheduler_gamma)
+
+scheduler = None
+if scheduler_type == 'cosine_annealing':
+    iterations = epochs * (n_train // batch_size)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=iterations)
+    print(f"Using cosine annealing scheduler")
+else:
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=scheduler_step, gamma=scheduler_gamma)
+    print(f"Using step scheduler")
 
 
 #-------------------------------------------------------------------------------
