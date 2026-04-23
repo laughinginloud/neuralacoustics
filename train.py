@@ -14,6 +14,7 @@ from neuralacoustics.utils import getProjectRoot
 from neuralacoustics.utils import getConfigParser
 from neuralacoustics.utils import openConfig
 from neuralacoustics.utils import count_params
+from neuralacoustics.utils import UnitGaussianNormalizer
 from neuralacoustics.adam import Adam # adam implementation that deals with complex tensors correctly [lacking in pytorch <=1.8, not sure afterwards]
 from torch.utils.tensorboard import SummaryWriter
 
@@ -22,8 +23,6 @@ from contextlib import redirect_stdout
 
 # retrieve PRJ_ROOT
 prj_root = getProjectRoot(__file__)
-
-
 
 #-------------------------------------------------------------------------------
 # training parameters
@@ -200,9 +199,7 @@ model_path = model_dir.joinpath(model_name) # full path to model: dir+name
 model_checkpoint_dir = model_dir.joinpath("checkpoints")
 model_checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-
-# log
-# txt file
+# Open txt file for logging
 f = open(str(model_path)+'.log', 'w')
 
 # tensorboard
@@ -290,18 +287,22 @@ if dev == 'gpu' or 'cuda' in dev:
     if torch.cuda.is_available():
         model = network(network_config_path, T_in).cuda()
         dev = torch.device('cuda')
+        if normalize:
+            y_normalizer.cuda()
         #print(torch.cuda.current_device())
         #print(torch.cuda.get_device_name(torch.cuda.current_device()))
     else:
         print('GPU/Cuda not available, switching to CPU...')
         model = network(network_config_path, T_in)
-        dev = torch.device('cpu')
+        dev  = torch.device('cpu')
+        if normalize:
+            y_normalizer.cpu()
 else:
     model = network(network_config_path, T_in)
     dev  = torch.device('cpu')
 
-if normalize:
-    y_normalizer.cuda()
+    if normalize:
+        y_normalizer.cpu()
 
 print('Device:', dev)
 
@@ -342,7 +343,6 @@ print('Epoch\tDuration\t\t\tLoss Step Train\t\t\tLoss Full Train\t\t\tLoss Step 
 
 myloss = LpLoss(size_average=False)
 for ep in range(epochs):
-
     #--------------------------------------------------------
     # train
     model.train()
@@ -359,38 +359,24 @@ for ep in range(epochs):
             with redirect_stdout(None):  # suppress the console output since the trace is being saved to file
                 trace_model(model, xx, export_format="html", export_path=model_dir.joinpath(model_name + '.html'))
 
-        # model outputs 1 timestep at a time [i.e., labels], so we iterate over T_out steps to compute loss
-        for t in range(0, T_out):
-            y = yy[..., t:t+1]
-            im = model(xx)
-            loss += myloss(im.reshape(batch_size, -1), y.reshape(batch_size, -1))
+        if inference_type == 'multiple_step':
+            # model outputs T_out timestep at a time
+            optimizer.zero_grad()
 
-            if t == 0:
-                pred = im
-            else:
-                pred = torch.cat((pred, im), -1)
+            pred = model(xx).view(batch_size, S, S, T_out)
 
-            xx = torch.cat((xx[..., 1:], im), dim=-1)
+            if normalize:
+                pred = y_normalizer.decode(pred)
+                yy = y_normalizer.decode(yy)
 
-        train_l2_step += loss.item()
-        l2_full = myloss(pred.reshape(batch_size, -1), yy.reshape(batch_size, -1))
-        train_l2_full += l2_full.item()
-        #VIC not sure why not simply train_l2_full += myloss(...) and get rid of l2_full at once [as in test], but the result is slightly different!!!
+            l2_full = myloss(pred.view(batch_size, -1), yy.view(batch_size, -1))
+            l2_full.backward()
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-    #--------------------------------------------------------
-    # test
-    test_l2_step = 0
-    test_l2_full = 0
-    with torch.no_grad():
-        for xx, yy in test_loader:
-            loss = 0
-            xx = xx.to(dev)
-            yy = yy.to(dev)
-
+            optimizer.step()
+            scheduler.step()
+            train_l2_full += l2_full.item()
+        else:
+            # model outputs 1 timestep at a time [i.e., labels], so we iterate over T_out steps to compute loss
             for t in range(0, T_out):
                 y = yy[..., t:t+1]
                 im = model(xx)
@@ -403,12 +389,51 @@ for ep in range(epochs):
 
                 xx = torch.cat((xx[..., 1:], im), dim=-1)
 
-            test_l2_step += loss.item()
-            test_l2_full += myloss(pred.reshape(batch_size, -1), yy.reshape(batch_size, -1)).item()
+            train_l2_step += loss.item()
+            l2_full = myloss(pred.reshape(batch_size, -1), yy.reshape(batch_size, -1))
+            train_l2_full += l2_full.item()
+            #VIC not sure why not simply train_l2_full += myloss(...) and get rid of l2_full at once [as in test], but the result is slightly different!!!
 
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+
+    #--------------------------------------------------------
+    # test
+    test_l2_step = 0
+    test_l2_full = 0
+    model.eval()
+    with torch.no_grad():
+        for xx, yy in test_loader:
+            loss = 0
+            xx = xx.to(dev)
+            yy = yy.to(dev)
+
+            if inference_type == 'multiple_step':
+                pred = model(xx).view(batch_size, S, S, T_out)
+                if normalize:
+                    pred = y_normalizer.decode(pred)
+
+                test_l2_full += myloss(pred.reshape(batch_size, -1), yy.reshape(batch_size, -1)).item()
+            else:
+                for t in range(0, T_out):
+                    y = yy[..., t:t+1]
+                    im = model(xx)
+                    loss += myloss(im.reshape(batch_size, -1), y.reshape(batch_size, -1))
+
+                    if t == 0:
+                        pred = im
+                    else:
+                        pred = torch.cat((pred, im), -1)
+
+                    xx = torch.cat((xx[..., 1:], im), dim=-1)
+
+                test_l2_step += loss.item()
+                test_l2_full += myloss(pred.reshape(batch_size, -1), yy.reshape(batch_size, -1)).item()
+    
     t2 = default_timer()
     scheduler.step()
-
 
     #--------------------------------------------------------
     #log
