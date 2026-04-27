@@ -1,6 +1,8 @@
 import torch
 from neuralacoustics.data_plotter import plotDomain # to plot dryrun
 
+import torch.nn.functional as F
+
 # adapted from:
 # Adib, Artur B. 
 # "Study notes on numerical solutions of the wave equation with the finite difference method." 
@@ -146,6 +148,30 @@ def run(dev, dt, nsteps, b, w, h, mu, rho, gamma, excite, bnd=torch.empty(0, 1),
   return sol, sol_t
 
 
+def fdtd_step(u_prev, u_curr, rho, mu, gamma, mask_boundary):
+    # padding
+    u_pad = F.pad(u_curr, (1,1,1,1), mode='constant', value=0)
+
+    u_l = u_pad[:, :, :-2, 1:-1]
+    u_r = u_pad[:, :, 2:, 1:-1]
+    u_d = u_pad[:, :, 1:-1, :-2]
+    u_u = u_pad[:, :, 1:-1, 2:]
+
+    # boundaries
+    u_l = torch.where(mask_boundary, gamma*u_curr, u_l)
+    u_r = torch.where(mask_boundary, gamma*u_curr, u_r)
+    u_u = torch.where(mask_boundary, gamma*u_curr, u_u)
+    u_d = torch.where(mask_boundary, gamma*u_curr, u_d)
+
+    lap = u_l + u_r + u_u + u_d - 4*u_curr
+
+    u_next = (
+        2*u_curr
+        + (mu - 1)*u_prev
+        + rho * lap
+    ) / (mu + 1)
+
+    return u_next[..., -1:]
 
 
 def getInfo():
