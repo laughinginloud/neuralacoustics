@@ -2,11 +2,15 @@ import torch
 from neuralacoustics.data_plotter import plotDomain # to plot dryrun
 
 import torch.nn.functional as F
+from neuralop.losses.differentiation import FiniteDiff
+from math import sqrt
 
 # adapted from:
 # Adib, Artur B. 
 # "Study notes on numerical solutions of the wave equation with the finite difference method." 
 # arXiv preprint physics/0009068 (2000).
+
+# TODO: rinominare rho -> areal mass density, ma spiegando che sistema è dimensionless
 
 info = {
   'description': '2D explicit solver of irreducible wave equation, for transverse waves (xi = displacement), with static boundaries and acoustic parameters',
@@ -14,6 +18,23 @@ info = {
   'rho':  '\"propagation\" factor, positive and lte 0.5; defined as rho = [v*(dt/ds)]^2, with v=speed of wave in medium [also sqrt(tension/area density)], ds=size of each grid point/cell [same on x and y] and dt=1/samplerate',
   'gamma': 'type of boundary: 0 if clamped edge, 1 if free edge'
 }
+
+vars = {
+  # TODO: init e poi riferimento da dentro fdtd step
+  # cont: rho, mu, gamma, mask?, fd, eta, dt, v, T
+}
+
+def setupVars(w, h, mu, rho, gamma, srate, T=8000):
+  vars['mu']    = mu
+  vars['rho']   = rho
+  vars['gamma'] = gamma
+  vars['dt']    = 1 / srate
+  vars['eta']   = 2 * mu / vars['dt']
+  vars['T']     = T
+  vars['v']     = sqrt(T / rho)
+  vars['ds']    = vars['dt'] * (vars['v'] * sqrt(2))
+  vars['fd']    = FiniteDiff(dim=3, h=(1.0 / w, 1.0 / h, vars['dt']), periodic_in_x=False, periodic_in_y=False, periodic_in_z=False)
+
 
 # solver
 def run(dev, dt, nsteps, b, w, h, mu, rho, gamma, excite, bnd=torch.empty(0, 1), disp=False, dispRate=1, pause=0):
@@ -148,30 +169,27 @@ def run(dev, dt, nsteps, b, w, h, mu, rho, gamma, excite, bnd=torch.empty(0, 1),
   return sol, sol_t
 
 
-def fdtd_step(u_prev, u_curr, rho, mu, gamma, mask_boundary):
-    # padding
-    u_pad = F.pad(u_curr, (1,1,1,1), mode='constant', value=0)
+def eqn(u):
+  # d^2u/dt^2 + eta du/dt = v^2 * (d^2u/dx^2 + d^2u/dy^2)
+  # where:
+  #   - eta = 2mu/dt
+  #   - dt = 1/samplerate
+  #   - v = sqrt(rho) * ds/dt = sqrt(T/rho)
+  #       -> siccome il sistema è dimensionless, abbiamo soltanto rho, dunque v, ds e T sono compresse
+  #          dunque per trovare v, utilizziamo una tensione standard T = tensione del rullante (8kN/m), ed otteniamo v = sqrt(T/rho) con rho uguale a quello del solver
+  #          manca ds, che può essere ottenuto tramite la condizione di stabilità
 
-    u_l = u_pad[:, :, :-2, 1:-1]
-    u_r = u_pad[:, :, 2:, 1:-1]
-    u_d = u_pad[:, :, 1:-1, :-2]
-    u_u = u_pad[:, :, 1:-1, 2:]
+  # stabilità: dt ≤ ds/( v * sqrt(2) ) -> ds = dt * (v*sqrt(2))
 
-    # boundaries
-    u_l = torch.where(mask_boundary, gamma*u_curr, u_l)
-    u_r = torch.where(mask_boundary, gamma*u_curr, u_r)
-    u_u = torch.where(mask_boundary, gamma*u_curr, u_u)
-    u_d = torch.where(mask_boundary, gamma*u_curr, u_d)
+  dudt  = vars['fd'].dz(u, order=1)
+  dudtt = vars['fd'].dz(u, order=2)
+  dudxx = vars['fd'].dx(u, order=2)
+  dudyy = vars['fd'].dy(u, order=2)
 
-    lap = u_l + u_r + u_u + u_d - 4*u_curr
+  lhs = dudtt + vars['eta'] * dudt
+  rhs = vars['v'] ** 2 * (dudxx + dudyy)
 
-    u_next = (
-        2*u_curr
-        + (mu - 1)*u_prev
-        + rho * lap
-    ) / (mu + 1)
-
-    return u_next[..., -1:]
+  return lhs, rhs
 
 
 def getInfo():

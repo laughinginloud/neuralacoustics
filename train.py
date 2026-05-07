@@ -15,7 +15,7 @@ from neuralacoustics.utils import getConfigParser
 from neuralacoustics.utils import openConfig
 from neuralacoustics.utils import count_params
 from neuralacoustics.utils import UnitGaussianNormalizer
-from neuralacoustics.adam import Adam # adam implementation that deals with complex tensors correctly [lacking in pytorch <=1.8, not sure afterwards]
+# from neuralacoustics.adam import Adam # adam implementation that deals with complex tensors correctly [lacking in pytorch <=1.8, not sure afterwards]
 from torch.utils.tensorboard import SummaryWriter
 
 from torchvista import trace_model
@@ -24,7 +24,8 @@ from contextlib import redirect_stdout
 # from neuralop.losses.data_losses import LpLoss
 from neuralop.losses.data_losses import H1Loss
 #from neuralop.losses.equation_losses import ICLoss
-from neuralop.losses.meta_losses import Relobralo
+from neuralop.losses.meta_losses import Relobralo, SoftAdapt
+from neuralop.training import AdamW
 from neuralacoustics.losses.physics_informed.dampedTransverseWaveProp_linear import WaveEqnLoss
 from neuralacoustics.losses.physics_informed.initialConditions import ICLoss
 
@@ -315,17 +316,20 @@ print('Device:', dev)
 
 
 print(f'Number of model\'s parameters: {count_params(model)}')
-optimizer = Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+optimizer = AdamW(params=model.parameters(), lr=learning_rate, weight_decay=1e-4)
 # optimizer = SGD(model.parameters(), lr=learning_rate, weight_decay=1e-4, momentum=0.9) # this would need to be modified to handle complex arithmetic
 
 scheduler = None
-if scheduler_type == 'cosine_annealing':
-    iterations = epochs * (n_train // batch_size)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=iterations)
-    print(f"Using cosine annealing scheduler")
-else:
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=scheduler_step, gamma=scheduler_gamma)
-    print(f"Using step scheduler")
+match scheduler_type:
+    case 'cosine_annealing':
+        iterations = epochs * (n_train // batch_size)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=iterations)
+        print(f"Using cosine annealing scheduler")
+    case 'step':
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=scheduler_step, gamma=scheduler_gamma)
+        print(f"Using step scheduler")
+    case _:
+        raise NotImplementedError
 
 # Load previous checkpoint
 prev_ep = 0
@@ -351,7 +355,7 @@ print('Epoch\tDuration\t\t\tLoss Step Train\t\t\tLoss Full Train\t\t\tLoss Step 
 l2_loss = LpLoss(d=2, p=2, size_average=False)
 h1_loss = H1Loss(d=2, periodic_in_x=False, periodic_in_y=False)
 ic_loss = ICLoss()
-equation_loss = WaveEqnLoss(dev, 64, 64, 0.1, 0.5, 0) # TODO: parametrizzare (i.e. prendere da file)
+equation_loss = WaveEqnLoss(w=64, h=64, mu=0.1, rho=0.5, gamma=0, srate=44100, loss=LpLoss()) # TODO: parametrizzare (i.e. prendere da file)
 
 train_losses_names = "l2", "ic", "equation"
 test_losses_names = "l2", "h1"
@@ -363,10 +367,15 @@ training_losses = {loss_map[name] for name in train_losses_names}
 train_loss = Relobralo(
     num_losses=len(training_losses),
     params=model.parameters(),
-    alpha=0.5,
-    beta=0.9,
-    tau=1.0,
+    # alpha=0.5,
+    # beta=0.9,
+    # tau=1.0,
 )
+
+# train_loss = SoftAdapt(
+#     num_losses=len(training_losses),
+#     params=model.parameters(),
+# )
 
 eval_losses = {loss_map[name] for name in test_losses_names}
 
@@ -380,8 +389,8 @@ for ep in range(epochs):
     loss_values = {name: [] for name in train_losses_names}
 
     t1 = default_timer()
-    train_l2_step = 0
-    train_l2_full = 0
+    train_loss_step = 0
+    train_loss_full = 0
     for xx, yy in train_loader:
         #loss = 0
         xx = xx.to(dev)
@@ -407,7 +416,7 @@ for ep in range(epochs):
 
             optimizer.step()
             scheduler.step()
-            train_l2_full += l2_full.item()
+            train_loss_full += l2_full.item()
 
         else:
             loss_vals = {}
@@ -428,10 +437,7 @@ for ep in range(epochs):
                 for loss_name in train_losses_names:
                     match loss_name:
                         case "equation":
-                            if t == 0:
-                                loss_val = loss_map[loss_name](im, torch.zeros_like(y))
-                            else:
-                                loss_val = loss_map[loss_name](im, yy[..., t-1:t])
+                            loss_val = loss_map[loss_name](xx)
 
                         case "l2":
                             loss_val = loss_map[loss_name](im.reshape(batch_size, -1), y.reshape(batch_size, -1))
@@ -446,10 +452,10 @@ for ep in range(epochs):
                     loss_values[loss_name].append(loss_val.item())
 
             # TODO: fix per l2. usare neuralop?
-            # train_l2_step += loss.item()
+            # train_loss_step += loss.item()
             # l2_full = myloss(pred.reshape(batch_size, -1), yy.reshape(batch_size, -1))
-            # train_l2_full += l2_full.item()
-            # #VIC not sure why not simply train_l2_full += myloss(...) and get rid of l2_full at once [as in test], but the result is slightly different!!!
+            # train_loss_full += l2_full.item()
+            # #VIC not sure why not simply train_loss_full += myloss(...) and get rid of l2_full at once [as in test], but the result is slightly different!!!
 
             optimizer.zero_grad()
             #loss.backward()
@@ -466,16 +472,31 @@ for ep in range(epochs):
 
             scheduler.step()
 
-            train_l2_step += total_loss
-            train_l2_full += loss_map["l2"](pred.reshape(batch_size, -1), yy.reshape(batch_size, -1)).item()
+            # TODO: see epoch_train_loss
+            train_loss_step += total_loss
+            # train_loss_full += loss_map["l2"](pred.reshape(batch_size, -1), yy.reshape(batch_size, -1)).item()
+            for loss_name in train_losses_names:
+                match loss_name:
+                    case "equation":
+                        train_loss_full += loss_map[loss_name](pred).item()
 
+                    case "l2":
+                        train_loss_full += loss_map[loss_name](pred.reshape(batch_size, -1), yy.reshape(batch_size, -1)).item()
+                        
+                    case "ic":
+                        train_loss_full += loss_map[loss_name](pred, yy).item()
+
+                    case _:
+                        raise NotImplementedError
+
+        # TODO: check effettivo utilizzo
         avg_train_loss = sum(train_losses) / len(train_losses)
         avg_losses = {name: sum(vals) / len(vals) for name, vals in loss_values.items()}
 
     #--------------------------------------------------------
     # test
-    test_l2_step = 0
-    test_l2_full = 0
+    test_loss_step = 0
+    test_loss_full = 0
 
     test_losses = {}
     test_losses_tot = {name: [] for name in test_losses_names}
@@ -492,7 +513,7 @@ for ep in range(epochs):
                 if normalize:
                     pred = y_normalizer.decode(pred)
 
-                test_l2_full += myloss(pred.reshape(batch_size, -1), yy.reshape(batch_size, -1)).item()
+                test_loss_full += myloss(pred.reshape(batch_size, -1), yy.reshape(batch_size, -1)).item()
 
             else:
                 for t in range(0, T_out):
@@ -521,12 +542,23 @@ for ep in range(epochs):
                         test_losses[name] = loss.item()
                         test_losses_tot[name].append(loss.item())
 
+                # TODO: check effettivo utilizzo
                 avg_test_loss = sum(test_losses.values()) / len(test_losses)                
                 avg_test_losses = {name: sum(vals) / len(vals) for name, vals in test_losses_tot.items()}
 
-                # TODO
-                test_l2_step += avg_test_loss
-                test_l2_full += loss_map["l2"](pred.reshape(batch_size, -1), yy.reshape(batch_size, -1)).item()
+                # TODO: see epoch_test_loss
+                test_loss_step += avg_test_loss
+                # test_loss_full += loss_map["l2"](pred.reshape(batch_size, -1), yy.reshape(batch_size, -1)).item()
+                for name in test_losses_names:
+                    match name:
+                        case "l2":
+                            test_loss_full += loss_map[name](pred.reshape(batch_size, -1), yy.reshape(batch_size, -1)).item()
+
+                        case "h1":
+                            test_loss_full += loss_map[name](im[..., -1], y[..., -1]).item()
+
+                        case _:
+                            raise NotImplementedError
     
     t2 = default_timer()
     scheduler.step()
@@ -534,13 +566,13 @@ for ep in range(epochs):
     #--------------------------------------------------------
     #log
 
-    # TODO
+    # TODO: check altre loss (somma o valori separati?)
     # tensorboard log
-    epoch_train_loss_step =  train_l2_step / n_train / T_out
-    epoch_train_loss_full =  train_l2_full / n_train
+    epoch_train_loss_step =  train_loss_step / n_train / T_out
+    epoch_train_loss_full =  train_loss_full / n_train
 
-    epoch_test_loss_step =  test_l2_step / n_test / T_out
-    epoch_test_loss_full =  test_l2_full / n_test
+    epoch_test_loss_step =  test_loss_step / n_test / T_out
+    epoch_test_loss_full =  test_loss_full / n_test
 
     writer.add_scalar("Loss Step/train", epoch_train_loss_step, ep + prev_ep)
     writer.add_scalar("Loss Full/train", epoch_train_loss_full, ep + prev_ep)
