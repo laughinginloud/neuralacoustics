@@ -1,7 +1,6 @@
 import torch
 from neuralacoustics.data_plotter import plotDomain # to plot dryrun
 
-import torch.nn.functional as F
 from neuralop.losses.differentiation import FiniteDiff
 from math import sqrt
 
@@ -19,21 +18,30 @@ info = {
   'gamma': 'type of boundary: 0 if clamped edge, 1 if free edge'
 }
 
-vars = {
-  # TODO: init e poi riferimento da dentro fdtd step
-  # cont: rho, mu, gamma, mask?, fd, eta, dt, v, T
-}
+# cont: rho, mu, gamma, mask?, fd, eta, dt, v, T
+vars = {}
 
-def setupVars(w, h, mu, rho, gamma, srate, T=8000):
-  vars['mu']    = mu
-  vars['rho']   = rho
-  vars['gamma'] = gamma
-  vars['dt']    = 1 / srate
-  vars['eta']   = 2 * mu / vars['dt']
-  vars['T']     = T
-  vars['v']     = sqrt(T / rho)
+predictions: torch.Tensor | None = None
+
+def setupVars(params):
+  vars['mu']    = params['mu']
+  vars['rho']   = params['rho']
+  vars['gamma'] = params['gamma']
+
+  # TODO: w, h, batch_size
+
+  # TODO: FINIRE (prendere da vars)
+  vars['dt']    = 1 / params['srate']
+  vars['eta']   = 2 * vars['mu'] / vars['dt']
+  vars['T']     = 8000
+  vars['v']     = sqrt(vars['T'] / vars['rho'])
   vars['ds']    = vars['dt'] * (vars['v'] * sqrt(2))
-  vars['fd']    = FiniteDiff(dim=3, h=(1.0 / w, 1.0 / h, vars['dt']), periodic_in_x=False, periodic_in_y=False, periodic_in_z=False)
+  vars['fd']    = FiniteDiff(dim=3, h=(1.0 / params['w'], 1.0 / params['h'], vars['dt']), periodic_in_x=False, periodic_in_y=False, periodic_in_z=False)
+
+  # 4 è la minima dimensione temporale per il calcolo delle derivate
+  # la logica è da rivedere per t_out > 1 e window_stride > 1
+  global predictions
+  predictions = torch.zeros((params['batch_size'], params['w'], params['h'], 4))
 
 
 # solver
@@ -181,15 +189,28 @@ def eqn(u):
 
   # stabilità: dt ≤ ds/( v * sqrt(2) ) -> ds = dt * (v*sqrt(2))
 
-  dudt  = vars['fd'].dz(u, order=1)
-  dudtt = vars['fd'].dz(u, order=2)
-  dudxx = vars['fd'].dx(u, order=2)
-  dudyy = vars['fd'].dy(u, order=2)
+  global predictions
+  assert predictions is not None, "Equation loss vars not initialized"
 
-  lhs = dudtt + vars['eta'] * dudt
-  rhs = vars['v'] ** 2 * (dudxx + dudyy)
+  with torch.no_grad():
+    predictions = torch.cat(tensors=(predictions[..., 1:], u), dim=-1)
+
+    dudt  = vars['fd'].dz(predictions, order=1)
+    dudtt = vars['fd'].dz(predictions, order=2)
+    dudxx = vars['fd'].dx(predictions, order=2)
+    dudyy = vars['fd'].dy(predictions, order=2)
+
+    lhs = dudtt + vars['eta'] * dudt
+    rhs = vars['v'] ** 2 * (dudxx + dudyy)
 
   return lhs, rhs
+
+def resetSeq():
+  global predictions
+  assert predictions is not None, "Equation loss vars not initialized"
+
+  with torch.no_grad():
+    predictions = torch.zeros_like(predictions)
 
 
 def getInfo():

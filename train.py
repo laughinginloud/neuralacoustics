@@ -26,7 +26,7 @@ from neuralop.losses.data_losses import H1Loss
 #from neuralop.losses.equation_losses import ICLoss
 from neuralop.losses.meta_losses import Relobralo, SoftAdapt
 from neuralop.training import AdamW
-from neuralacoustics.losses.physics_informed.dampedTransverseWaveProp_linear import WaveEqnLoss
+from neuralacoustics.losses.physics_informed.eqnLoss import EqnLoss
 from neuralacoustics.losses.physics_informed.initialConditions import ICLoss
 
 # retrieve PRJ_ROOT
@@ -355,7 +355,8 @@ print('Epoch\tDuration\t\t\tLoss Step Train\t\t\tLoss Full Train\t\t\tLoss Step 
 l2_loss = LpLoss(d=2, p=2, size_average=False)
 h1_loss = H1Loss(d=2, periodic_in_x=False, periodic_in_y=False)
 ic_loss = ICLoss()
-equation_loss = WaveEqnLoss(w=64, h=64, mu=0.1, rho=0.5, gamma=0, srate=44100, loss=LpLoss()) # TODO: parametrizzare (i.e. prendere da file)
+# equation_loss = WaveEqnLoss(w=64, h=64, mu=0.1, rho=0.5, gamma=0, srate=44100, loss=LpLoss()) # TODO: parametrizzare (i.e. prendere da file)
+equation_loss = EqnLoss(prj_root=prj_root, caller=__file__)
 
 train_losses_names = "l2", "ic", "equation"
 test_losses_names = "l2", "h1"
@@ -395,6 +396,11 @@ for ep in range(epochs):
         #loss = 0
         xx = xx.to(dev)
         yy = yy.to(dev)
+
+        # TODO:
+        #   - controllare min(wind_lim, n_step)  (wind_lim da ini del training, n_step dall'eqnloss) (fuori dal loop)
+        #   - counter che controlli sul valore precedente la fine di una sequenza; quando finisce, chiamare un reset che rimetta a zero eqnloss.predictions
+        # per ora non minimizzare su eqn, controllare solo la magnitudo per vedere se è sensata
 
         if trace:
             trace = False  # trace only with the first chunk
@@ -437,7 +443,7 @@ for ep in range(epochs):
                 for loss_name in train_losses_names:
                     match loss_name:
                         case "equation":
-                            loss_val = loss_map[loss_name](xx)
+                            loss_val = loss_map[loss_name](pred)
 
                         case "l2":
                             loss_val = loss_map[loss_name](im.reshape(batch_size, -1), y.reshape(batch_size, -1))
