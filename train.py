@@ -114,6 +114,8 @@ scheduler_type = config['training'].get('scheduler')
 scheduler_step = config['training'].getint('scheduler_step')
 scheduler_gamma = config['training'].getfloat('scheduler_gamma')
 
+aggregation_strategy = config['training'].get('aggregation_strategy')
+
 checkpoint_step = config['training'].getint('checkpoint_step')
 
 # Normalization
@@ -319,15 +321,17 @@ print(f'Number of model\'s parameters: {count_params(model)}')
 optimizer = AdamW(params=model.parameters(), lr=learning_rate, weight_decay=1e-4)
 # optimizer = SGD(model.parameters(), lr=learning_rate, weight_decay=1e-4, momentum=0.9) # this would need to be modified to handle complex arithmetic
 
-scheduler = None
+#scheduler = None
 match scheduler_type:
     case 'cosine_annealing':
         iterations = epochs * (n_train // batch_size)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=iterations)
-        print(f"Using cosine annealing scheduler")
+        print("Using cosine annealing scheduler")
+
     case 'step':
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=scheduler_step, gamma=scheduler_gamma)
-        print(f"Using step scheduler")
+        print("Using step scheduler")
+
     case _:
         raise NotImplementedError
 
@@ -341,22 +345,13 @@ if load_model_name != "":
     prev_ep = state_dict['epoch'] + 1
 
 #-------------------------------------------------------------------------------
-# train!
-
-print('\n___Start training!___')
-t1 = default_timer()
-
-# log and print headers
-# not using same string due to formatting visualization differences
-log_str = 'Epoch\tDuration\t\t\t\tLoss Step Train\t\t\tLoss Full Train\t\t\tLoss Step Test\t\t\tLoss Full Test'
-f.write(log_str)
-print('Epoch\tDuration\t\t\tLoss Step Train\t\t\tLoss Full Train\t\t\tLoss Step Test\t\t\tLoss Full Test')
+# losses
 
 l2_loss = LpLoss(d=2, p=2, size_average=False)
 h1_loss = H1Loss(d=2, periodic_in_x=False, periodic_in_y=False)
 ic_loss = ICLoss()
 # equation_loss = WaveEqnLoss(w=64, h=64, mu=0.1, rho=0.5, gamma=0, srate=44100, loss=LpLoss()) # TODO: parametrizzare (i.e. prendere da file)
-equation_loss = EqnLoss(prj_root=prj_root, caller=__file__)
+equation_loss = EqnLoss(prj_root=prj_root, caller=__file__, loss=LpLoss())
 
 train_losses_names = "l2", "ic", "equation"
 test_losses_names = "l2", "h1"
@@ -365,20 +360,43 @@ loss_map = {"l2": l2_loss, "h1": h1_loss, "ic": ic_loss, "equation": equation_lo
 
 training_losses = {loss_map[name] for name in train_losses_names}
 
-train_loss = Relobralo(
-    num_losses=len(training_losses),
-    params=model.parameters(),
-    # alpha=0.5,
-    # beta=0.9,
-    # tau=1.0,
-)
+match aggregation_strategy:
+    case "relobralo":
+        train_loss = Relobralo(
+            num_losses=len(training_losses),
+            params=model.parameters(),
+            # alpha=0.5,
+            # beta=0.9,
+            # tau=1.0,
+        )
+        print("Using ReLoBRaLo loss aggregation strategy")
 
-# train_loss = SoftAdapt(
-#     num_losses=len(training_losses),
-#     params=model.parameters(),
-# )
+    case "softadapt":
+        train_loss = SoftAdapt(
+            num_losses=len(training_losses),
+            params=model.parameters(),
+        )
+        print("Using SoftAdapt loss aggregation strategy")
+
+    case _:
+        raise NotImplementedError
+
 
 eval_losses = {loss_map[name] for name in test_losses_names}
+
+seq_lim = min(win_limit if win_limit > -1 else T_out, equation_loss.n_steps)
+seq_ctr = 1
+
+#-------------------------------------------------------------------------------
+# train!
+print('\n___Start training!___')
+t1 = default_timer()
+
+# log and print headers
+# not using same string due to formatting visualization differences
+log_str = 'Epoch\tDuration\t\t\t\tLoss Step Train\t\t\tLoss Full Train\t\t\tLoss Step Test\t\t\tLoss Full Test'
+f.write(log_str)
+print('Epoch\tDuration\t\t\tLoss Step Train\t\t\tLoss Full Train\t\t\tLoss Step Test\t\t\tLoss Full Test')
 
 #myloss = LpLoss(size_average=False)
 for ep in range(epochs):
@@ -401,6 +419,12 @@ for ep in range(epochs):
         #   - controllare min(wind_lim, n_step)  (wind_lim da ini del training, n_step dall'eqnloss) (fuori dal loop)
         #   - counter che controlli sul valore precedente la fine di una sequenza; quando finisce, chiamare un reset che rimetta a zero eqnloss.predictions
         # per ora non minimizzare su eqn, controllare solo la magnitudo per vedere se è sensata
+
+        if seq_ctr == seq_lim:
+            seq_ctr = 1
+            equation_loss.resetSeq()
+        else:
+            seq_ctr += 1
 
         if trace:
             trace = False  # trace only with the first chunk
