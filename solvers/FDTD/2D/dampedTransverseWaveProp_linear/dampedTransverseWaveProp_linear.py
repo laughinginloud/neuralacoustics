@@ -18,7 +18,7 @@ info = {
   'gamma': 'type of boundary: 0 if clamped edge, 1 if free edge'
 }
 
-# cont: rho, mu, gamma, mask?, fd, eta, dt, v, T
+# cont: rho, mu, gamma, fd, eta, dt, v, T
 vars = {}
 
 predictions: torch.Tensor | None = None
@@ -28,10 +28,7 @@ def setupVars(params):
   vars['rho']   = params['rho']
   vars['gamma'] = params['gamma']
 
-  # TODO: w, h, batch_size
-
-  # TODO: FINIRE (prendere da vars)
-  vars['dt']    = 1 / params['srate']
+  vars['dt']    = 1 / params['samplerate']
   vars['eta']   = 2 * vars['mu'] / vars['dt']
   vars['T']     = 8000
   vars['v']     = sqrt(vars['T'] / vars['rho'])
@@ -188,6 +185,8 @@ def eqn(u):
   #          manca ds, che può essere ottenuto tramite la condizione di stabilità
 
   # stabilità: dt ≤ ds/( v * sqrt(2) ) -> ds = dt * (v*sqrt(2))
+
+  # TODO: tradurre commenti qua sopra
 
   global predictions
   assert predictions is not None, "Equation loss vars not initialized"

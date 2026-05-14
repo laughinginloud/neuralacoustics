@@ -2,42 +2,57 @@ import torch
 import importlib
 import torch.nn.functional as F
 
-from neuralacoustics.utils import getConfigParser
+from neuralacoustics.utils import getConfigParser, openConfig
 
 class EqnLoss:
   def __init__(self, prj_root, caller, loss=F.mse_loss):
-    # TODO: parsing config
+    config, _ = getConfigParser(prj_root, caller)
 
-    self.vars = {}
+    self.vars = {'batch_size': config['training'].getint('batch_size')}
+    
+    config = config['dataset_generation'].get('dataset_generator')
+    config = config.replace('PRJ_ROOT', prj_root)
+    config = config + '/' + config.split('/')[-1] + '.ini'
+    config = openConfig(config, caller)
 
-    # DA CONFIG DATASET GENERATOR
-    self.vars['mu']    = 0.1
-    self.vars['rho']   = 0.5
-    self.vars['gamma'] = 0
-    self.vars['w']     = 64
-    self.vars['h']     = 64
-    self.vars['srate'] = 44100
+    self.vars |= dict(config.items('numerical_model_parameters'))
+    # self.vars |= dict(config.items('dataset_generator_parameters'))
 
-    self.vars['batch_size'] = 20  # DA CONFIG DEL TRAINER (non dataset generator)
+    for k, v in self.vars.items():
+      try:
+        tmp = int(v)
+        self.vars[k] = tmp
+      except ValueError:
+        try:
+          tmp = float(v)
+          self.vars[k] = tmp
+        except ValueError:
+          pass
 
-    self.n_steps = 20  # TODO: controllare a chi serve (solo al training?)
+    config = config['dataset_generator_parameters'].get('numerical_model')
+    config = config.replace('PRJ_ROOT', prj_root)
+    config = config + '/' + config.split('/')[-1] + '.ini'
+    config = openConfig(config, caller)
 
-    # TODO: sostituire solver con function pointer
-    self.solver = importlib.import_module("solvers.FDTD.2D.dampedTransverseWaveProp_linear.dampedTransverseWaveProp_linear")
+    config = config['solver'].get('solver')
+    config = config.split('/')
+    config = '.'.join(config[1:] + [config[-1]])
+
+    self.solver = importlib.import_module(config)
 
     self.solver.setupVars(self.vars)
     self.loss = loss
 
   def __call__(self, u):
-    _bs, _x, _y, t = u.shape
+    time = u.shape[-1]
 
-    loss = torch.empty(t)
+    loss = torch.empty(time)
 
     # TODO: tradurre
     # il for è per gestire sia il caso single_step che il caso multiple_step
     # nel caso single step ci aspettiamo una soluzione alla volta, e sarà il train a fare l'average
     # nel caso multiple step, riceviamo più soluzioni e facciamo la prediction
-    for i in range(0, t):
+    for i in range(0, time):
       lhs, rhs = self.solver.eqn(u[..., i:i+1])
       loss[i] = self.loss(lhs, rhs)   # TODO: controllare se numero puro o insieme di dim batch
 

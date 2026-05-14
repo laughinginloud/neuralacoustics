@@ -384,7 +384,7 @@ match aggregation_strategy:
 
 eval_losses = {loss_map[name] for name in test_losses_names}
 
-seq_lim = min(win_limit if win_limit > -1 else T_out, equation_loss.n_steps)
+seq_lim = min(win_limit if win_limit > -1 else T_out, equation_loss.vars['nsteps'])
 seq_ctr = 1
 
 #-------------------------------------------------------------------------------
