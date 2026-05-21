@@ -18,7 +18,7 @@ info = {
   'gamma': 'type of boundary: 0 if clamped edge, 1 if free edge'
 }
 
-# cont: rho, mu, gamma, fd, eta, dt, v, T
+# cont: mu, rho, gamma, dt, eta, T, v, ds, fd
 vars = {}
 
 predictions: torch.Tensor | None = None

@@ -15,7 +15,7 @@ from neuralacoustics.utils import getConfigParser
 from neuralacoustics.utils import openConfig
 from neuralacoustics.utils import count_params
 from neuralacoustics.utils import UnitGaussianNormalizer
-# from neuralacoustics.adam import Adam # adam implementation that deals with complex tensors correctly [lacking in pytorch <=1.8, not sure afterwards]
+from neuralacoustics.adam import Adam # adam implementation that deals with complex tensors correctly [lacking in pytorch <=1.8, not sure afterwards]
 from torch.utils.tensorboard import SummaryWriter
 
 from torchvista import trace_model
@@ -24,7 +24,7 @@ from contextlib import redirect_stdout
 # from neuralop.losses.data_losses import LpLoss
 from neuralop.losses.data_losses import H1Loss
 #from neuralop.losses.equation_losses import ICLoss
-from neuralop.losses.meta_losses import Relobralo, SoftAdapt
+from neuralop.losses.meta_losses import Relobralo, SoftAdapt, WeightedSumLoss
 from neuralop.training import AdamW
 from neuralacoustics.losses.physics_informed.eqnLoss import EqnLoss
 from neuralacoustics.losses.physics_informed.initialConditions import ICLoss
@@ -113,6 +113,8 @@ learning_rate = config['training'].getfloat('learning_rate')
 scheduler_type = config['training'].get('scheduler')
 scheduler_step = config['training'].getint('scheduler_step')
 scheduler_gamma = config['training'].getfloat('scheduler_gamma')
+
+optimizer = config['training'].get('optimizer')
 
 aggregation_strategy = config['training'].get('aggregation_strategy')
 
@@ -318,7 +320,17 @@ print('Device:', dev)
 
 
 print(f'Number of model\'s parameters: {count_params(model)}')
-optimizer = AdamW(params=model.parameters(), lr=learning_rate, weight_decay=1e-4)
+
+match optimizer:
+    case 'adam':
+        optimizer = Adam(params=model.parameters(), lr=learning_rate, weight_decay=1e-4)
+
+    case 'adamw':
+        optimizer = AdamW(params=model.parameters(), lr=learning_rate, weight_decay=1e-4)
+
+    case _:
+        raise NotImplementedError
+
 # optimizer = SGD(model.parameters(), lr=learning_rate, weight_decay=1e-4, momentum=0.9) # this would need to be modified to handle complex arithmetic
 
 #scheduler = None
@@ -350,13 +362,12 @@ if load_model_name != "":
 l2_loss = LpLoss(d=2, p=2, size_average=False)
 h1_loss = H1Loss(d=2, periodic_in_x=False, periodic_in_y=False)
 ic_loss = ICLoss()
-# equation_loss = WaveEqnLoss(w=64, h=64, mu=0.1, rho=0.5, gamma=0, srate=44100, loss=LpLoss()) # TODO: parametrizzare (i.e. prendere da file)
 equation_loss = EqnLoss(prj_root=prj_root, caller=__file__, loss=LpLoss())
 
-train_losses_names = "l2", "ic", "equation"
-test_losses_names = "l2", "h1"
+train_losses_names = {str.strip() for str in config['training'].get('losses_train').split(',')}
+test_losses_names  = {str.strip() for str in config['training'].get('losses_test') .split(',')}
 
-loss_map = {"l2": l2_loss, "h1": h1_loss, "ic": ic_loss, "equation": equation_loss}
+loss_map = {"l2": l2_loss, "h1": h1_loss, "ic": ic_loss, "eq": equation_loss}
 
 training_losses = {loss_map[name] for name in train_losses_names}
 
@@ -378,14 +389,22 @@ match aggregation_strategy:
         )
         print("Using SoftAdapt loss aggregation strategy")
 
+    case "sum" | "avg":
+        train_loss = WeightedSumLoss(losses=training_losses)
+        print("Using weighted average loss aggregation strategy")
+
     case _:
         raise NotImplementedError
 
 
 eval_losses = {loss_map[name] for name in test_losses_names}
 
-seq_lim = min(win_limit if win_limit > -1 else T_out, equation_loss.vars['nsteps'])
 seq_ctr = 1
+# TODO: check correttezza
+if win_limit == -1 or win_stride == 1:
+    seq_lim = T_in + T_out
+else:
+    seq_lim = min(win_limit, equation_loss.vars['nsteps'])
 
 #-------------------------------------------------------------------------------
 # train!
@@ -466,7 +485,7 @@ for ep in range(epochs):
 
                 for loss_name in train_losses_names:
                     match loss_name:
-                        case "equation":
+                        case "eq":
                             loss_val = loss_map[loss_name](pred)
 
                         case "l2":
@@ -507,7 +526,7 @@ for ep in range(epochs):
             # train_loss_full += loss_map["l2"](pred.reshape(batch_size, -1), yy.reshape(batch_size, -1)).item()
             for loss_name in train_losses_names:
                 match loss_name:
-                    case "equation":
+                    case "eq":
                         train_loss_full += loss_map[loss_name](pred).item()
 
                     case "l2":
