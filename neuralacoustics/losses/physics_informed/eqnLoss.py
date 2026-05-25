@@ -5,7 +5,10 @@ import torch.nn.functional as F
 from neuralacoustics.utils import getConfigParser, openConfig
 
 class EqnLoss:
-  def __init__(self, prj_root, caller, loss=F.mse_loss):
+  def __init__(self, prj_root, caller, dev, loss=F.mse_loss):
+    self.dev = dev
+    self.loss = loss
+
     config, _ = getConfigParser(prj_root, caller)
 
     self.vars = {'batch_size': config['training'].getint('batch_size')}
@@ -39,14 +42,12 @@ class EqnLoss:
     config = '.'.join(config[1:] + [config[-1]])
 
     self.solver = importlib.import_module(config)
-
-    self.solver.setupVars(self.vars)
-    self.loss = loss
+    self.solver.setupVars(self.vars | {'dev': self.dev})
 
   def __call__(self, u):
     time = u.shape[-1]
 
-    loss = torch.empty(time)
+    loss = torch.empty(size=(time,), device=self.dev)
 
     # TODO: tradurre
     # il for è per gestire sia il caso single_step che il caso multiple_step

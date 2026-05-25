@@ -38,7 +38,7 @@ def setupVars(params):
   # 4 è la minima dimensione temporale per il calcolo delle derivate
   # la logica è da rivedere per t_out > 1 e window_stride > 1
   global predictions
-  predictions = torch.zeros((params['batch_size'], params['w'], params['h'], 4))
+  predictions = torch.zeros(size=(params['batch_size'], params['w'], params['h'], 4), device=params['dev'])
 
 
 # solver

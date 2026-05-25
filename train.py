@@ -324,14 +324,18 @@ print(f'Number of model\'s parameters: {count_params(model)}')
 match optimizer:
     case 'adam':
         optimizer = Adam(params=model.parameters(), lr=learning_rate, weight_decay=1e-4)
+        print("Using Adam optimizer")
 
     case 'adamw':
         optimizer = AdamW(params=model.parameters(), lr=learning_rate, weight_decay=1e-4)
+        print("Using AdamW optimizer")
+
+    # case 'sgd':
+        # optimizer = SGD(model.parameters(), lr=learning_rate, weight_decay=1e-4, momentum=0.9) # this would need to be modified to handle complex arithmetic
 
     case _:
         raise NotImplementedError
 
-# optimizer = SGD(model.parameters(), lr=learning_rate, weight_decay=1e-4, momentum=0.9) # this would need to be modified to handle complex arithmetic
 
 #scheduler = None
 match scheduler_type:
@@ -362,7 +366,7 @@ if load_model_name != "":
 l2_loss = LpLoss(d=2, p=2, size_average=False)
 h1_loss = H1Loss(d=2, periodic_in_x=False, periodic_in_y=False)
 ic_loss = ICLoss()
-equation_loss = EqnLoss(prj_root=prj_root, caller=__file__, loss=LpLoss())
+equation_loss = EqnLoss(prj_root=prj_root, caller=__file__, dev=dev, loss=LpLoss())
 
 train_losses_names = {str.strip() for str in config['training'].get('losses_train').split(',')}
 test_losses_names  = {str.strip() for str in config['training'].get('losses_test') .split(',')}
@@ -401,7 +405,7 @@ eval_losses = {loss_map[name] for name in test_losses_names}
 
 seq_ctr = 1
 # TODO: check correttezza
-if win_limit == -1 or win_stride == 1:
+if win_limit == -1:
     seq_lim = T_in + T_out
 else:
     seq_lim = min(win_limit, equation_loss.vars['nsteps'])
@@ -629,6 +633,12 @@ for ep in range(epochs):
     writer.add_scalar("Loss Step/test", epoch_test_loss_step, ep + prev_ep)
     writer.add_scalar("Loss Full/test", epoch_test_loss_full, ep + prev_ep)
 
+    for k, v in loss_vals.items():
+        writer.add_scalar("Individual Loss/" + k + " (Train)", v, ep + prev_ep)
+    for k, v in test_losses.items():
+        writer.add_scalar("Individual Loss/" + k + " (Test)", v, ep + prev_ep)
+
+
     # log file and print
     # not using same string due to formatting visualization differences
     f.write('\n')
@@ -636,6 +646,13 @@ for ep in range(epochs):
     f.write(log_str)
     print(f'{ep + prev_ep}\t{t2 - t1}\t\t{epoch_train_loss_step}\t\t{epoch_train_loss_full}\t\t{epoch_test_loss_step}\t\t{epoch_test_loss_full}')
 
+
+    print()
+    for k, v in loss_vals.items():
+        print(k + ": " + str(v.item()))
+    for k, v in test_losses.items():
+        print(k + ": " + str(v))
+    print()
 
     #--------------------------------------------------------
     # Save model, optimizer and scheduler status every checkpoint_step epochs
