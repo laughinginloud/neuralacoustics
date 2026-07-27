@@ -363,10 +363,21 @@ if load_model_name != "":
 #-------------------------------------------------------------------------------
 # losses
 
+#eq_loss_method = None
+match config['training'].get('eq_loss_method'):
+    case "lp" | "":
+        eq_loss_method = LpLoss()
+    
+    case "mse":
+        eq_loss_method = torch.nn.functional.mse_loss
+
+    case _:
+        raise NotImplementedError
+
 l2_loss = LpLoss(d=2, p=2, size_average=False)
 h1_loss = H1Loss(d=2, periodic_in_x=False, periodic_in_y=False)
 ic_loss = ICLoss()
-equation_loss = EqnLoss(prj_root=prj_root, caller=__file__, dev=dev, loss=LpLoss())
+equation_loss = EqnLoss(prj_root=prj_root, caller=__file__, dev=dev, loss=eq_loss_method)
 
 train_losses_names = {str.strip() for str in config['training'].get('losses_train').split(',')}
 test_losses_names  = {str.strip() for str in config['training'].get('losses_test') .split(',')}
