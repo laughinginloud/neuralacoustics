@@ -1,4 +1,8 @@
-# Model tracing
+# Current results
+
+[To the result index](./models/index.html)
+
+# Model tracing (as was originally presented)
 
 To trace a model, enable the flag in `default.ini`. The trace will then be in the same folder as the trained model.
 Some sample traces:
@@ -6,7 +10,8 @@ Some sample traces:
 - [improved architecture](./trace/complete.html)
 - [modular architecture](./trace/better_modularity.html)
 
-# Neuralacoustics: A Deep Learning Framework For Musical Acoustics Simulations 
+# Original README
+## Neuralacoustics: A Deep Learning Framework For Musical Acoustics Simulations 
 
 Neuralacoustics is a framework designed for the generation of numerical musical acoustics datasets and the training/benchmarking of acoustics neural operators.
 
@@ -98,12 +103,12 @@ The key features of the data generation pipeline also apply to the training and 
 4. Install required libraries in environment:
 
 	```
-    conda install pytorch torchvision torchaudio -c pytorch
-
-    conda install cudatoolkit=11.3 -c pytorch
-
-    conda install scipy h5py matplotlib -c pytorch
-
+	    conda install pytorch torchvision torchaudio -c pytorch
+	
+	    conda install cudatoolkit=11.3 -c pytorch
+	
+	    conda install scipy h5py matplotlib -c pytorch
+	
 	conda install tensorboard -c conda-forge
 	```
 
